@@ -498,8 +498,8 @@ final class AudioRecorderService: ObservableObject, @unchecked Sendable {
         if let recordingsDirectoryOverride {
             return recordingsDirectoryOverride
         }
-        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(Self.recordingsDirectoryName)
+        return AppConstants.appSupportDirectory
+            .appendingPathComponent(Self.recordingsDirectoryName, isDirectory: true)
     }
 
     // MARK: - Transcription Buffer Access

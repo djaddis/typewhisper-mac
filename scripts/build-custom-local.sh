@@ -36,7 +36,8 @@ DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-16.2.app/Contents/Developer}
     CODE_SIGNING_ALLOWED=NO \
     MARKETING_VERSION=1.5.1 \
     CURRENT_PROJECT_VERSION=928 \
-    APP_GROUP_ID=2D8ALY3LCL.com.typewhisper.mac
+    APP_GROUP_ID=local.com.typewhisper.mac.custom \
+    PRODUCT_BUNDLE_IDENTIFIER=com.typewhisper.mac.custom
 
 app="$derived_data/Build/Products/Release/TypeWhisper.app"
 if [[ ! -d "$app" ]]; then
@@ -61,6 +62,8 @@ cat > "$entitlements" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
 </dict>
@@ -73,6 +76,7 @@ codesign --force --options runtime --entitlements "$entitlements" --sign "$ident
 codesign --verify --deep --strict "$app"
 
 osascript -e 'tell application id "com.typewhisper.mac" to quit' >/dev/null 2>&1 || true
+osascript -e 'tell application id "com.typewhisper.mac.custom" to quit' >/dev/null 2>&1 || true
 for _ in {1..20}; do
   pgrep -x TypeWhisper >/dev/null || break
   sleep 0.25
@@ -87,5 +91,11 @@ trap 'rm -rf "$stage"' EXIT
 ditto "$app" "$stage/TypeWhisper.app"
 rm -rf "$target"
 ditto "$stage/TypeWhisper.app" "$target"
+if ! defaults read com.typewhisper.mac.custom >/dev/null 2>&1; then
+  settings="$(mktemp)"
+  defaults export com.typewhisper.mac "$settings" >/dev/null
+  defaults import com.typewhisper.mac.custom "$settings" >/dev/null
+fi
+defaults write com.typewhisper.mac.custom apiServerEnabled -bool true
 open "$target"
 echo "Installed optimized custom build: $target"

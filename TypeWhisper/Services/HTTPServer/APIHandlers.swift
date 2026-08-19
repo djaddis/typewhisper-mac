@@ -1112,6 +1112,13 @@ final class APIHandlers: @unchecked Sendable {
                     message: "Microphone permission requested. Approve access, then try again."
                 )
             }
+            if dictationViewModel.needsAccessibilityPermission {
+                dictationViewModel.requestAccessibilityPermission()
+                return .error(
+                    status: 409,
+                    message: "Accessibility permission requested. Approve access, then try again."
+                )
+            }
 
             let id = dictationViewModel.apiStartRecording()
             if let session = dictationViewModel.apiDictationSession(id: id), session.status == .failed {
