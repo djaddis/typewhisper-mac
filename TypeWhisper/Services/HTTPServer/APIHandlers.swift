@@ -1105,6 +1105,13 @@ final class APIHandlers: @unchecked Sendable {
             guard !dictationViewModel.isRecording else {
                 return .error(status: 409, message: "Already recording")
             }
+            if dictationViewModel.needsMicPermission {
+                dictationViewModel.requestMicPermission()
+                return .error(
+                    status: 409,
+                    message: "Microphone permission requested. Approve access, then try again."
+                )
+            }
 
             let id = dictationViewModel.apiStartRecording()
             if let session = dictationViewModel.apiDictationSession(id: id), session.status == .failed {
