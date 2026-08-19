@@ -46,6 +46,7 @@ final class APIHandlers: @unchecked Sendable {
         router.register("PUT", "/v1/profiles/toggle", handler: handleToggleRule)
         router.register("POST", "/v1/dictation/start", handler: handleStartDictation)
         router.register("POST", "/v1/dictation/stop", handler: handleStopDictation)
+        router.register("POST", "/v1/dictation/cancel", handler: handleCancelDictation)
         router.register("GET", "/v1/dictation/status", handler: handleDictationStatus)
         router.register("GET", "/v1/dictation/transcription", handler: handleDictationTranscription)
         router.register("POST", "/v1/recorder/start", handler: handleStartRecorder)
@@ -1135,6 +1136,26 @@ final class APIHandlers: @unchecked Sendable {
                 let status: String
             }
             return .json(StopResponse(id: id.uuidString, status: "stopped"))
+        }
+    }
+
+    // MARK: - POST /v1/dictation/cancel
+
+    private func handleCancelDictation(_ request: HTTPRequest) async -> HTTPResponse {
+        let dictationViewModel = self.dictationViewModel
+        return await MainActor.run {
+            guard dictationViewModel.isRecording else {
+                return .error(status: 409, message: "Not recording")
+            }
+            guard let id = dictationViewModel.apiCancelRecording() else {
+                return .error(status: 500, message: "Missing active dictation session")
+            }
+
+            struct CancelResponse: Encodable {
+                let id: String
+                let status: String
+            }
+            return .json(CancelResponse(id: id.uuidString, status: "cancelled"))
         }
     }
 

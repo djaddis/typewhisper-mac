@@ -663,6 +663,13 @@ final class DictationViewModel: ObservableObject {
         return sessionID
     }
 
+    func apiCancelRecording() -> UUID? {
+        guard state == .recording else { return nil }
+        let sessionID = activeDictationSessionID
+        cancelCurrentOperation()
+        return sessionID
+    }
+
     func apiDictationSession(id: UUID) -> DictationSessionSnapshot? {
         if let session = dictationSessions[id] {
             return session

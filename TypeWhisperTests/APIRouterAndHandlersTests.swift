@@ -2807,6 +2807,81 @@ final class APIRouterAndHandlersTests: XCTestCase {
         XCTAssertEqual(recordID, startID)
     }
 
+    @MainActor
+    func testDictationCancelEndpointDiscardsActiveRecording() async throws {
+        let appSupportDirectory = try TestSupport.makeTemporaryDirectory()
+        var context: APIContext?
+        defer {
+            context = nil
+            TestSupport.remove(appSupportDirectory)
+        }
+
+        context = Self.makeAPIContext(
+            appSupportDirectory: appSupportDirectory,
+            withMockTranscriptionPlugin: true
+        )
+        let apiContext = try XCTUnwrap(context)
+        var pasteCount = 0
+
+        apiContext.audioRecordingService.hasMicrophonePermissionOverride = true
+        apiContext.audioRecordingService.inputAvailabilityOverride = { _ in true }
+        apiContext.audioRecordingService.startRecordingOverride = {}
+        apiContext.audioRecordingService.stopRecordingOverride = { _ in [] }
+        apiContext.textInsertionService.pasteSimulatorOverride = {
+            pasteCount += 1
+        }
+
+        let startResponse = await apiContext.router.route(HTTPRequest(
+            method: "POST",
+            path: "/v1/dictation/start",
+            queryParams: [:],
+            headers: [:],
+            body: Data()
+        ))
+        let start = try Self.jsonObject(startResponse)
+        let sessionID = try XCTUnwrap(start["id"] as? String)
+
+        let cancelResponse = await apiContext.router.route(HTTPRequest(
+            method: "POST",
+            path: "/v1/dictation/cancel",
+            queryParams: [:],
+            headers: [:],
+            body: Data()
+        ))
+        let cancel = try Self.jsonObject(cancelResponse)
+
+        XCTAssertEqual(cancelResponse.status, 200)
+        XCTAssertEqual(cancel["id"] as? String, sessionID)
+        XCTAssertEqual(cancel["status"] as? String, "cancelled")
+        XCTAssertFalse(apiContext.dictationViewModel.isRecording)
+
+        let session = try XCTUnwrap(
+            apiContext.dictationViewModel.apiDictationSession(
+                id: try XCTUnwrap(UUID(uuidString: sessionID))
+            )
+        )
+        XCTAssertEqual(session.status, .failed)
+        XCTAssertEqual(session.error, String(localized: "Cancelled"))
+        XCTAssertNil(session.transcription)
+        XCTAssertEqual(pasteCount, 0)
+
+        let repeatedCancel = await apiContext.router.route(HTTPRequest(
+            method: "POST",
+            path: "/v1/dictation/cancel",
+            queryParams: [:],
+            headers: [:],
+            body: Data()
+        ))
+        let repeatedCancelJSON = try Self.jsonObject(repeatedCancel)
+        XCTAssertEqual(repeatedCancel.status, 409)
+        XCTAssertEqual(
+            (repeatedCancelJSON["error"] as? [String: Any])?["message"] as? String,
+            "Not recording"
+        )
+
+        try? await Task.sleep(for: .milliseconds(50))
+    }
+
     func testDictationEndpointsSpeakCompletedTranscriptionOnly() async throws {
         let appSupportDirectory = try TestSupport.makeTemporaryDirectory()
         var context: APIContext?

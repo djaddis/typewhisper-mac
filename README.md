@@ -355,6 +355,9 @@ curl -X POST http://localhost:8978/v1/dictation/start
 # Stop dictation (returns same session id)
 curl -X POST http://localhost:8978/v1/dictation/stop
 
+# Cancel dictation without transcribing or inserting text
+curl -X POST http://localhost:8978/v1/dictation/cancel
+
 # Check whether dictation is currently recording
 curl http://localhost:8978/v1/dictation/status
 
@@ -362,7 +365,7 @@ curl http://localhost:8978/v1/dictation/status
 curl "http://localhost:8978/v1/dictation/transcription?id=<uuid>"
 ```
 
-Dictation control records microphone audio for system-wide insertion. A completed dictation session returns text that TypeWhisper can paste back into the active app.
+Dictation control records microphone audio for system-wide insertion. A completed dictation session returns text that TypeWhisper can paste back into the active app. Cancelling discards the recording and does not run transcription or text insertion.
 
 ### Recorder Control
 
