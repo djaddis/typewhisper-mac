@@ -7,10 +7,11 @@ identity="TypeWhisper Local Signing"
 keychain="$HOME/Library/Keychains/login.keychain-db"
 target="/Applications/TypeWhisper.app"
 
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+
 if ! security find-certificate -c "$identity" "$keychain" >/dev/null 2>&1; then
   echo "Creating local TypeWhisper signing identity..." >&2
-  temporary="$(mktemp -d)"
-  trap 'rm -rf "$temporary"' EXIT
   openssl req -x509 -newkey rsa:2048 -sha256 -days 7300 -nodes \
     -keyout "$temporary/key.pem" -out "$temporary/cert.pem" \
     -subj "/CN=$identity" \
@@ -22,6 +23,13 @@ if ! security find-certificate -c "$identity" "$keychain" >/dev/null 2>&1; then
     -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 >/dev/null 2>&1
   security import "$temporary/id.p12" -k "$keychain" -P twtemp \
     -A -T /usr/bin/codesign >/dev/null
+fi
+
+security find-certificate -c "$identity" -p "$keychain" > "$temporary/cert.pem"
+if ! security verify-cert -c "$temporary/cert.pem" -p codeSign >/dev/null 2>&1; then
+  echo "Trusting local TypeWhisper signing identity..." >&2
+  security add-trusted-cert -d -r trustRoot -p codeSign \
+    -k "$keychain" "$temporary/cert.pem"
 fi
 
 DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-16.2.app/Contents/Developer}" \
