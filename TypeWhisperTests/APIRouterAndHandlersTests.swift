@@ -3067,35 +3067,50 @@ final class APIRouterAndHandlersTests: XCTestCase {
     }
 
     @MainActor
-    func testPreserveClipboardKeepsGeneratedTextUntilFallbackRestoreWhenPasteIsUnverified() async throws {
+    func testPreserveClipboardWaitsForSlowTargetAppToReadBeforeRestoring() async throws {
         let service = TextInsertionService()
         let pasteboard = NSPasteboard.withUniqueName()
         service.accessibilityGrantedOverride = true
         service.pasteboardProvider = { pasteboard }
         service.focusedTextElementOverride = { nil }
-        service.defaultPasteFallbackRestoreDelay = .milliseconds(80)
-
-        let pasteStarted = expectation(description: "synthetic paste started")
-        service.pasteSimulatorOverride = {
-            pasteStarted.fulfill()
-        }
+        service.restoreAfterReadGraceDelay = .milliseconds(1)
 
         pasteboard.clearContents()
         pasteboard.setString("Existing", forType: .string)
 
-        let insertionTask = Task {
-            try await service.insertText("Hello", preserveClipboard: true)
+        // Under heavy load the target app handles Cmd+V long after the paste was posted.
+        let pastedText = PastedTextRecorder()
+        service.pasteSimulatorOverride = {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(500))
+                pastedText.value = pasteboard.string(forType: .string)
+            }
         }
 
-        await fulfillment(of: [pasteStarted], timeout: 1.0)
-        XCTAssertEqual(pasteboard.string(forType: .string), "Hello")
+        let result = try await service.insertText("Hello", preserveClipboard: true)
 
-        try await Task.sleep(for: .milliseconds(20))
-        XCTAssertEqual(pasteboard.string(forType: .string), "Hello")
-
-        let result = try await insertionTask.value
+        XCTAssertEqual(pastedText.value, "Hello")
         XCTAssertEqual(result, .pasted(verification: .unverified(.focusedTextStateUnavailable)))
         XCTAssertEqual(pasteboard.string(forType: .string), "Existing")
+    }
+
+    @MainActor
+    func testPreserveClipboardLeavesTranscriptOnClipboardWhenTargetAppNeverReadsIt() async throws {
+        let service = TextInsertionService()
+        let pasteboard = NSPasteboard.withUniqueName()
+        service.accessibilityGrantedOverride = true
+        service.pasteboardProvider = { pasteboard }
+        service.focusedTextElementOverride = { nil }
+        service.pasteboardReadTimeout = .milliseconds(50)
+        service.pasteSimulatorOverride = {}
+
+        pasteboard.clearContents()
+        pasteboard.setString("Existing", forType: .string)
+
+        let result = try await service.insertText("Hello", preserveClipboard: true)
+
+        XCTAssertEqual(result, .pasted(verification: .unverified(.clipboardNotRead)))
+        XCTAssertEqual(pasteboard.string(forType: .string), "Hello")
     }
 
     @MainActor
@@ -3107,7 +3122,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         service.pasteboardProvider = { pasteboard }
         service.focusedTextElementOverride = { element }
         service.captureActiveAppOverride = { ("Pages", "com.apple.iWork.Pages", nil) }
-        service.verifiedRestoreGraceDelay = .milliseconds(1)
+        service.restoreAfterReadGraceDelay = .milliseconds(1)
 
         pasteboard.clearContents()
         pasteboard.setString("Existing", forType: .string)
@@ -3124,6 +3139,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         var pasteCount = 0
         service.pasteSimulatorOverride = {
             pasteCount += 1
+            _ = pasteboard.string(forType: .string)
         }
         service.focusedTextStateOverride = { _ in
             if pasteCount == 0 {
@@ -3178,11 +3194,12 @@ final class APIRouterAndHandlersTests: XCTestCase {
         service.pasteboardProvider = { pasteboard }
         service.focusedTextElementOverride = { element }
         service.captureActiveAppOverride = { ("iTerm2", "com.googlecode.iterm2", nil) }
-        service.terminalPasteFallbackRestoreDelay = .milliseconds(1)
+        service.restoreAfterReadGraceDelay = .milliseconds(1)
 
         var pasteCount = 0
         service.pasteSimulatorOverride = {
             pasteCount += 1
+            _ = pasteboard.string(forType: .string)
         }
         service.focusedTextStateOverride = { _ in
             if pasteCount == 0 {
@@ -3209,92 +3226,6 @@ final class APIRouterAndHandlersTests: XCTestCase {
     }
 
     @MainActor
-    func testVerifiedTerminalPasteKeepsGeneratedTextUntilTerminalRestoreDelay() async throws {
-        let service = TextInsertionService()
-        let pasteboard = NSPasteboard.withUniqueName()
-        let element = AXUIElementCreateSystemWide()
-        service.accessibilityGrantedOverride = true
-        service.pasteboardProvider = { pasteboard }
-        service.focusedTextElementOverride = { element }
-        service.captureActiveAppOverride = { ("Terminal", "com.apple.Terminal", nil) }
-        service.terminalPasteFallbackRestoreDelay = .milliseconds(80)
-        service.verifiedRestoreGraceDelay = .milliseconds(1)
-
-        let pasteStarted = expectation(description: "terminal synthetic paste started")
-        var pasteCount = 0
-        service.pasteSimulatorOverride = {
-            pasteCount += 1
-            pasteStarted.fulfill()
-        }
-        service.focusedTextStateOverride = { _ in
-            if pasteCount == 0 {
-                return (value: "", selectedText: nil, selectedRange: NSRange(location: 0, length: 0))
-            }
-            return (value: "Hello", selectedText: nil, selectedRange: NSRange(location: 5, length: 0))
-        }
-
-        pasteboard.clearContents()
-        pasteboard.setString("Existing", forType: .string)
-
-        let insertionTask = Task {
-            try await service.insertText("Hello", preserveClipboard: true)
-        }
-
-        await fulfillment(of: [pasteStarted], timeout: 1.0)
-        XCTAssertEqual(pasteboard.string(forType: .string), "Hello")
-
-        try await Task.sleep(for: .milliseconds(20))
-        XCTAssertEqual(pasteboard.string(forType: .string), "Hello")
-
-        let result = try await insertionTask.value
-        XCTAssertEqual(result, .pasted(verification: .verified))
-        XCTAssertEqual(pasteboard.string(forType: .string), "Existing")
-    }
-
-    @MainActor
-    func testVerifiedNonTerminalSyntheticPasteUsesGraceDelayBeforeClipboardRestore() async throws {
-        let service = TextInsertionService()
-        let pasteboard = NSPasteboard.withUniqueName()
-        let element = AXUIElementCreateSystemWide()
-        service.accessibilityGrantedOverride = true
-        service.pasteboardProvider = { pasteboard }
-        service.focusedTextElementOverride = { element }
-        service.captureActiveAppOverride = { ("Notes", "com.apple.Notes", nil) }
-        service.defaultPasteFallbackRestoreDelay = .milliseconds(1)
-        service.verifiedRestoreGraceDelay = .milliseconds(80)
-
-        let pasteStarted = expectation(description: "non-terminal synthetic paste started")
-        var pasteCount = 0
-        service.pasteSimulatorOverride = {
-            pasteCount += 1
-            pasteStarted.fulfill()
-        }
-        service.focusedTextStateOverride = { _ in
-            if pasteCount == 0 {
-                return (value: "", selectedText: nil, selectedRange: NSRange(location: 0, length: 0))
-            }
-            return (value: "Hello", selectedText: nil, selectedRange: NSRange(location: 5, length: 0))
-        }
-
-        pasteboard.clearContents()
-        pasteboard.setString("Existing", forType: .string)
-
-        let insertionTask = Task {
-            try await service.insertText("**Hello**", preserveClipboard: true, outputFormat: "rtf")
-        }
-
-        await fulfillment(of: [pasteStarted], timeout: 1.0)
-        XCTAssertEqual(pasteboard.string(forType: .string), "Hello")
-
-        try await Task.sleep(for: .milliseconds(20))
-        XCTAssertEqual(pasteboard.string(forType: .string), "Hello")
-
-        let result = try await insertionTask.value
-        XCTAssertEqual(result, .pasted(verification: .verified))
-        XCTAssertEqual(pasteboard.string(forType: .string), "Existing")
-    }
-
-    @MainActor
     func testSilentAXNoopFallsBackToSyntheticPasteInsteadOfReportingDirectSuccess() async throws {
         let service = TextInsertionService()
         let pasteboard = NSPasteboard.withUniqueName()
@@ -3303,7 +3234,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         service.pasteboardProvider = { pasteboard }
         service.focusedTextElementOverride = { element }
         service.pasteVerificationAttempts = 0
-        service.defaultPasteFallbackRestoreDelay = .milliseconds(1)
+        service.restoreAfterReadGraceDelay = .milliseconds(1)
         service.focusedTextStateOverride = { _ in
             (value: "", selectedText: nil, selectedRange: NSRange(location: 0, length: 0))
         }
@@ -3317,6 +3248,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         var pasteCount = 0
         service.pasteSimulatorOverride = {
             pasteCount += 1
+            _ = pasteboard.string(forType: .string)
         }
 
         pasteboard.clearContents()
@@ -3338,7 +3270,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         service.accessibilityGrantedOverride = true
         service.pasteboardProvider = { pasteboard }
         service.focusedTextElementOverride = { element }
-        service.verifiedRestoreGraceDelay = .milliseconds(1)
+        service.restoreAfterReadGraceDelay = .milliseconds(1)
 
         var didAttemptDirectAXInsertion = false
         var pasteCount = 0
@@ -3360,6 +3292,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         }
         service.pasteSimulatorOverride = {
             pasteCount += 1
+            _ = pasteboard.string(forType: .string)
         }
 
         pasteboard.clearContents()
@@ -3504,7 +3437,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         service.accessibilityGrantedOverride = true
         service.pasteboardProvider = { pasteboard }
         service.focusedTextElementOverride = { element }
-        service.defaultPasteFallbackRestoreDelay = .milliseconds(1)
+        service.restoreAfterReadGraceDelay = .milliseconds(1)
         service.pasteVerificationAttempts = 0
         service.focusedTextStateOverride = { _ in
             (value: "", selectedText: nil, selectedRange: NSRange(location: 0, length: 0))
@@ -3514,6 +3447,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         var didSimulatePaste = false
         service.pasteSimulatorOverride = {
             didSimulatePaste = true
+            _ = pasteboard.string(forType: .string)
         }
 
         pasteboard.clearContents()
@@ -3622,7 +3556,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         service.accessibilityGrantedOverride = true
         service.pasteboardProvider = { pasteboard }
         service.focusedTextElementOverride = { element }
-        service.defaultPasteFallbackRestoreDelay = .milliseconds(1)
+        service.restoreAfterReadGraceDelay = .milliseconds(1)
         service.pasteVerificationAttempts = 0
         service.focusedTextStateOverride = { _ in
             (value: "", selectedText: nil, selectedRange: NSRange(location: 0, length: 0))
@@ -3639,6 +3573,7 @@ final class APIRouterAndHandlersTests: XCTestCase {
         service.pasteSimulatorOverride = {
             didSimulatePaste = true
             pasteboardTypesAtPaste = pasteboard.pasteboardItems?.first?.types ?? []
+            _ = pasteboard.data(forType: .rtf)
         }
 
         pasteboard.clearContents()
@@ -9959,4 +9894,9 @@ final class HotkeyServiceCompatibilityTests: XCTestCase {
             modifierFlags: isDown ? [.function] : []
         )
     }
+}
+
+@MainActor
+private final class PastedTextRecorder {
+    var value: String?
 }

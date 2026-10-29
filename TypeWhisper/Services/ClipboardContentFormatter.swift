@@ -47,6 +47,52 @@ struct ClipboardContentPayload {
         }
         pasteboard.writeObjects([item])
     }
+
+    /// Writes the payload as promised data so the returned tracker reports when another app reads it.
+    /// Marker types are written eagerly; content is served only on request.
+    func writePromised(
+        to pasteboard: NSPasteboard,
+        markerTypes: [NSPasteboard.PasteboardType] = []
+    ) -> PasteboardReadTracker {
+        var representations: [NSPasteboard.PasteboardType: Data] = [.string: Data(plainText.utf8)]
+        for representation in additionalRepresentations {
+            representations[representation.type] = representation.data
+        }
+        let tracker = PasteboardReadTracker(representations: representations)
+
+        let item = NSPasteboardItem()
+        item.setDataProvider(tracker, forTypes: Array(representations.keys))
+        for markerType in markerTypes {
+            item.setData(Data(), forType: markerType)
+        }
+        pasteboard.writeObjects([item])
+        return tracker
+    }
+}
+
+/// Serves promised pasteboard content and counts how often other apps request it.
+final class PasteboardReadTracker: NSObject, NSPasteboardItemDataProvider {
+    private let representations: [NSPasteboard.PasteboardType: Data]
+    private let readCountState = OSAllocatedUnfairLock(initialState: 0)
+
+    init(representations: [NSPasteboard.PasteboardType: Data]) {
+        self.representations = representations
+    }
+
+    var readCount: Int {
+        readCountState.withLock { $0 }
+    }
+
+    func pasteboard(
+        _ pasteboard: NSPasteboard?,
+        item: NSPasteboardItem,
+        provideDataForType type: NSPasteboard.PasteboardType
+    ) {
+        readCountState.withLock { $0 += 1 }
+        if let data = representations[type] {
+            item.setData(data, forType: type)
+        }
+    }
 }
 
 enum ClipboardContentFormatter {

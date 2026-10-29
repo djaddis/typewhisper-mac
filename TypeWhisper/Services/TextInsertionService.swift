@@ -43,10 +43,9 @@ final class TextInsertionService {
     var textSelectionViaCopyOverride: (() -> String?)?
     var pasteVerificationAttempts = 10
     var pasteVerificationPollingDelay: Duration = .milliseconds(50)
-    var defaultPasteFallbackRestoreDelay: Duration = .milliseconds(350)
-    var richTextPasteFallbackRestoreDelay: Duration = .milliseconds(1500)
-    var terminalPasteFallbackRestoreDelay: Duration = .milliseconds(900)
-    var verifiedRestoreGraceDelay: Duration = .milliseconds(150)
+    var pasteboardReadTimeout: Duration = .seconds(3)
+    var pasteboardReadPollingDelay: Duration = .milliseconds(10)
+    var restoreAfterReadGraceDelay: Duration = .milliseconds(150)
     var copySelectionRetryDelay: Duration = .milliseconds(120)
     var copySelectionReadSettleDelay: Duration = .milliseconds(20)
 
@@ -63,6 +62,7 @@ final class TextInsertionService {
     enum PasteVerificationFailure: String, Equatable {
         case focusedTextStateUnavailable = "focused-text-state-unavailable"
         case focusedTextUnchanged = "focused-text-unchanged"
+        case clipboardNotRead = "clipboard-not-read"
     }
 
     enum TextInsertionError: LocalizedError {
@@ -579,42 +579,50 @@ final class TextInsertionService {
         let pasteVerificationState = capturePasteVerificationState()
         let initialChangeCount = pasteboard.changeCount
 
-        // Set transcribed text on clipboard and simulate Cmd+V.
-        // Text stays on clipboard as fallback if no text field is focused.
+        // Without preserveClipboard the text simply stays on the clipboard. With it, the text is
+        // promised so the original clipboard is restored only after the target app has read it.
         pasteboard.clearContents()
         let generatedPayload = formattedClipboardPayload ?? ClipboardContentPayload(plainText: text)
-        generatedPayload.write(to: pasteboard, markerTypes: generatedPasteboardMarkerTypes)
+        let readTracker: PasteboardReadTracker?
+        if preserveClipboard {
+            readTracker = generatedPayload.writePromised(to: pasteboard, markerTypes: generatedPasteboardMarkerTypes)
+        } else {
+            generatedPayload.write(to: pasteboard, markerTypes: generatedPasteboardMarkerTypes)
+            readTracker = nil
+        }
+        let generatedChangeCount = pasteboard.changeCount
         logger.info(
-            "insertText using synthetic paste: bundle=\(bundleId ?? "nil", privacy: .public), preserveClipboard=\(preserveClipboard, privacy: .public), changeCountBefore=\(initialChangeCount, privacy: .public), changeCountAfterWrite=\(pasteboard.changeCount, privacy: .public)"
+            "insertText using synthetic paste: bundle=\(bundleId ?? "nil", privacy: .public), preserveClipboard=\(preserveClipboard, privacy: .public), changeCountBefore=\(initialChangeCount, privacy: .public), changeCountAfterWrite=\(generatedChangeCount, privacy: .public)"
         )
         simulatePaste()
 
-        let verification = await waitForPasteVerification(using: pasteVerificationState)
-        logPasteVerification(verification, bundleId: bundleId)
-
-        if preserveClipboard {
-            let restoreDelay: Duration
-            if isTerminalApp {
-                restoreDelay = terminalPasteFallbackRestoreDelay
-            } else if verification == .verified {
-                restoreDelay = verifiedRestoreGraceDelay
-            } else if requiresPasteboardInsertion {
-                restoreDelay = richTextPasteFallbackRestoreDelay
+        let verification: PasteVerification
+        if let readTracker {
+            // AX polling must wait until the read: the target app may block on our promised data.
+            if await waitForFirstPasteboardRead(readTracker) {
+                verification = await waitForPasteVerification(using: pasteVerificationState)
+                await waitForPasteboardReadsToSettle(readTracker)
+                if pasteboard.changeCount == generatedChangeCount {
+                    restoreClipboard(savedItems, to: pasteboard)
+                    logger.info(
+                        "insertText restored clipboard: bundle=\(bundleId ?? "nil", privacy: .public), reads=\(readTracker.readCount, privacy: .public), changeCountAfterRestore=\(pasteboard.changeCount, privacy: .public)"
+                    )
+                }
             } else {
-                restoreDelay = defaultPasteFallbackRestoreDelay
-            }
-
-            if verification != .verified {
+                verification = .unverified(.clipboardNotRead)
+                // Keep the transcript on the clipboard so a late paste or a manual Cmd+V still inserts it.
+                if pasteboard.changeCount == generatedChangeCount {
+                    pasteboard.clearContents()
+                    generatedPayload.write(to: pasteboard, markerTypes: generatedPasteboardMarkerTypes)
+                }
                 logger.warning(
-                    "insertText delaying clipboard restore after unverified paste: bundle=\(bundleId ?? "nil", privacy: .public), delay=\(String(describing: restoreDelay), privacy: .public)"
+                    "insertText target app did not read the clipboard in time; leaving transcript on clipboard: bundle=\(bundleId ?? "nil", privacy: .public)"
                 )
             }
-            try? await Task.sleep(for: restoreDelay)
-            restoreClipboard(savedItems, to: pasteboard)
-            logger.info(
-                "insertText restored clipboard: bundle=\(bundleId ?? "nil", privacy: .public), changeCountAfterRestore=\(pasteboard.changeCount, privacy: .public)"
-            )
+        } else {
+            verification = await waitForPasteVerification(using: pasteVerificationState)
         }
+        logPasteVerification(verification, bundleId: bundleId)
 
         if hadFocusedTextField {
             try? await Task.sleep(for: .milliseconds(50))
@@ -641,6 +649,26 @@ final class TextInsertionService {
         return canRestoreClipboard(afterPasteUsing: state)
             ? .verified
             : .unverified(.focusedTextUnchanged)
+    }
+
+    private func waitForFirstPasteboardRead(_ tracker: PasteboardReadTracker) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: pasteboardReadTimeout)
+        while tracker.readCount == 0 {
+            guard ContinuousClock.now < deadline else { return false }
+            try? await Task.sleep(for: pasteboardReadPollingDelay)
+        }
+        return true
+    }
+
+    /// Apps may request several representations in turn, so wait until reads go quiet.
+    private func waitForPasteboardReadsToSettle(_ tracker: PasteboardReadTracker) async {
+        var observedReads = tracker.readCount
+        while true {
+            try? await Task.sleep(for: restoreAfterReadGraceDelay)
+            let currentReads = tracker.readCount
+            guard currentReads != observedReads else { return }
+            observedReads = currentReads
+        }
     }
 
     private func logPasteVerification(_ verification: PasteVerification, bundleId: String?) {
